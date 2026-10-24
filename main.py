@@ -1,6 +1,8 @@
 import time
 import requests
 import pandas as pd
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # -------------------------------------------------------------
 # بيانات البوت وتليغرام الخاصة بك
@@ -8,8 +10,19 @@ import pandas as pd
 TELEGRAM_TOKEN = "8630854974:AAHWPeRpHIw7SdzoiGjEh1Qub3eQ5puXrcE"
 CHAT_ID = "2107579721"
 
-# تتبع العملات التي تم إرسال تنبيه لها لمنع التكرار المستمر
+# تتبع العملات لمنع التكرار
 alerted_levels = {}
+
+# سيرفر وهمي صغير لرضا منصة Render وتجنب خطأ البورت
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running 24/7!")
+
+def run_fake_server():
+    server = HTTPServer(('0.0.0.0', 10000), SimpleHandler)
+    server.serve_forever()
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -24,8 +37,7 @@ def send_telegram_message(message):
         print(f"خطأ أثناء إرسال الرسالة: {e}")
 
 def get_usd_symbols():
-    # قائمة الـ 62 زوجاً المقترنة بـ USD المتاحة على منصة Breakout
-    breakout_symbols = [
+    return [
         "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD", 
         "AVAXUSD", "DOGEUSD", "DOTUSD", "LINKUSD", "UNIUSD",
         "LTCUSD", "BCHUSD", "NEARUSD", "MATICUSD", "ATOMUSD",
@@ -40,13 +52,10 @@ def get_usd_symbols():
         "LDOUSD", "RPLUSD", "FXSUSD", "PEPEUSD", "SHIBUSD", 
         "FLOKIUSD", "ARUSD"
     ]
-    return breakout_symbols
 
-# جلب بيانات فريم يومي لتحديد مستوى النمط (الخط البرتقالي / بداية شمعة الانعكاس)
 def get_daily_key_level(symbol):
     try:
-        # استخدام بيانات كراكن أو بينانس للرموز المتوافقة مع USD
-        binance_symbol = symbol.replace("USD", "USDT") # كبديل متوافق لجلـب الكلاينز بدقة
+        binance_symbol = symbol.replace("USD", "USDT")
         url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval=1d&limit=10"
         response = requests.get(url)
         if response.status_code != 200:
@@ -64,19 +73,16 @@ def get_daily_key_level(symbol):
         if len(df) < 5:
             return None
             
-        c1 = df.iloc[-4] # شمعة الزخم الأولى
-        c2 = df.iloc[-3] # شمعة الزخم الثانية
-        c3 = df.iloc[-2] # الشمعة المعاكسة (التصحيحية)
+        c1 = df.iloc[-4]
+        c2 = df.iloc[-3]
+        c3 = df.iloc[-2]
         avg_body = df['body_size'].mean()
         
-        # شروط الزخم اليومي (شمعتان كبيرتان نسبياً)
         is_large = (c1['body_size'] > avg_body * 0.8) and (c2['body_size'] > avg_body * 0.8)
         
-        # صاعد ثم شمعة حمراء معاكسة
         if c1['close'] > c1['open'] and c2['close'] > c2['open'] and c3['close'] < c3['open'] and is_large:
             return {"type": "BULLISH_REVERSAL", "level": c3['open']}
             
-        # هابط ثم شمعة خضراء معاكسة
         if c1['close'] < c1['open'] and c2['close'] < c2['open'] and c3['close'] > c3['open'] and is_large:
             return {"type": "BEARISH_REVERSAL", "level": c3['open']}
             
@@ -84,7 +90,6 @@ def get_daily_key_level(symbol):
     except Exception:
         return None
 
-# فحص الاختراق على فريم الساعة (1h) لمستوى اليومي المحدد
 def check_hourly_breakout(symbol):
     pattern = get_daily_key_level(symbol)
     if not pattern:
@@ -93,7 +98,6 @@ def check_hourly_breakout(symbol):
     key_level = pattern["level"]
     binance_symbol = symbol.replace("USD", "USDT")
     
-    # جلب شمعات فريم الساعة
     url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval=1h&limit=5"
     response = requests.get(url)
     if response.status_code != 200:
@@ -113,26 +117,23 @@ def check_hourly_breakout(symbol):
     if cache_key in alerted_levels:
         return None
 
-    # التحقق من الاختراق على فريم الساعة
     if prev_price <= key_level and current_price > key_level:
         alerted_levels[cache_key] = True
-        return f"🚀 **اختراق صعودي على فريم الساعة!**\n" \
-               f"📌 العملة: `{symbol}`\n" \
-               f"🟠 مستوى الزخم اليومي المخترق (بداية شمعة الانعكاس): `{key_level}`\n" \
-               f"📈 السعر الحالي: `{current_price}`"
+        return f"🚀 **اختراق صعودي على فريم الساعة!**\n📌 العملة: `{symbol}`\n🟠 مستوى الزخم اليومي: `{key_level}`\n📈 السعر: `{current_price}`"
                
     elif prev_price >= key_level and current_price < key_level:
         alerted_levels[cache_key] = True
-        return f"⚠️ **كسر هبوطي على فريم الساعة!**\n" \
-               f"📌 العملة: `{symbol}`\n" \
-               f"🟠 مستوى الزخم اليومي المكسور (بداية شمعة الانعكاس): `{key_level}`\n" \
-               f"📉 السعر الحالي: `{current_price}`"
+        return f"⚠️ **كسر هبوطي على فريم الساعة!**\n📌 العملة: `{symbol}`\n🟠 مستوى الزخم اليومي: `{key_level}`\n📉 السعر: `{current_price}`"
                
     return None
 
 def main():
+    # تشغيل السيرفر الوهمي في الخلفية لترضى عنه منصة Render
+    server_thread = threading.Thread(target=run_fake_server, daemon=True)
+    server_thread.start()
+    
     print("بدء المراقبة الذكية لـ 62 زوجاً على فريم الساعة...")
-    send_telegram_message("🤖 *تم تحديث البوت لمراقبة الـ 62 عملة المتاحة على Breakout بناءً على استراتيجية الفريم اليومي والساعة.*")
+    send_telegram_message("🤖 *تم تشغيل البوت بنجاح ومراقبة الـ 62 عملة مفعلة الآن!*")
     
     symbols = get_usd_symbols()
     
@@ -142,12 +143,9 @@ def main():
                 alert = check_hourly_breakout(symbol)
                 if alert:
                     send_telegram_message(alert)
-                    print(f"تم إرسال إشعار اختراق للعملة: {symbol}")
                 time.sleep(1)
             except Exception as e:
                 print(f"خطأ في فحص {symbol}: {e}")
-        
-        # إعادة الفحص كل 5 دقائق
         time.sleep(300)
 
 if __name__ == "__main__":
